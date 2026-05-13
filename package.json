@@ -1,0 +1,17 @@
+{
+  "name": "cheapmeal-mail-bot-v3-webhook-v17",
+  "version": "17.0.0",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "imapflow": "^1.0.181",
+    "mailparser": "^3.7.2",
+    "express": "^4.18.3",
+    "cors": "^2.8.5"
+  }
+}
