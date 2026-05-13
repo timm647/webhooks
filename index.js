@@ -28,7 +28,7 @@ process.on('unhandledRejection', error => {
   logFatalError('unhandledRejection', error);
 });
 
-const required = ['EMAIL_USER', 'EMAIL_PASS', 'DISCORD_TOKEN', 'GUILD_ID'];
+const required = ['DISCORD_TOKEN', 'GUILD_ID'];
 
 let hasMissingRequiredConfig = false;
 for (const key of required) {
@@ -39,8 +39,6 @@ for (const key of required) {
 }
 
 const CONFIG = {
-  emailUser: process.env.EMAIL_USER,
-  emailPass: process.env.EMAIL_PASS,
   discordToken: process.env.DISCORD_TOKEN,
   guildId: process.env.GUILD_ID,
   checkIntervalSeconds: parseInt(process.env.CHECK_INTERVAL_SECONDS || '30', 10),
@@ -311,7 +309,7 @@ function envelopeText(envelope) {
 function isLikelyUsefulEnvelope(envelope) {
   const text = envelopeText(envelope);
   if (!text) return false;
-  if (text.includes(CONFIG.formSubmitKeyword)) return true;
+  // Les commandes site arrivent maintenant par webhook, plus par FormSubmit/Gmail.
   if (text.includes('paypal')) return true;
   if (CONFIG.paypalAllowedSenders.some(domain => text.includes(domain))) return true;
   if (/\bcm[-\s]?\d{4,6}\b/i.test(text)) return true;
@@ -784,7 +782,19 @@ function buildDeliveryButtons(code) {
 async function evaluateOrder(code) {
   if (isSuppressed(code)) return;
   const orders = readJson(ORDERS_FILE);
-  const order = orders[code];
+  let order = orders[code];
+
+  // Sécurité Render : si le fichier data/orders.json est perdu après un redémarrage
+  // mais que le suivi dashboard avait déjà reçu la commande webhook, on garde le snapshot.
+  if (!order) {
+    const dashboardMessages = readJson(DASHBOARD_MESSAGES_FILE);
+    if (dashboardMessages[code]?.orderSnapshot) {
+      order = dashboardMessages[code].orderSnapshot;
+      orders[code] = order;
+      writeJson(ORDERS_FILE, orders);
+    }
+  }
+
   const { channel: ticketChannel, ticket } = await getTicketOrder(code);
   const paypalTotal = getPaymentsTotal(code);
   const state = buildOrderState(code, order, ticket, paypalTotal);
@@ -978,7 +988,8 @@ Quantité : **x${mainQuantity}**`,
           channelId: CONFIG.dashboardChannelId,
           status: state.status,
           updatedAt: new Date().toISOString(),
-          createdAt: dashboardMessages[code]?.createdAt || new Date().toISOString()
+          createdAt: dashboardMessages[code]?.createdAt || new Date().toISOString(),
+          ...(order ? { orderSnapshot: order } : {})
         };
         writeJson(DASHBOARD_MESSAGES_FILE, dashboardMessages);
         return;
@@ -993,7 +1004,8 @@ Quantité : **x${mainQuantity}**`,
         channelId: CONFIG.dashboardChannelId,
         status: state.status,
         updatedAt: new Date().toISOString(),
-        createdAt: dashboardMessages[code]?.createdAt || new Date().toISOString()
+        createdAt: dashboardMessages[code]?.createdAt || new Date().toISOString(),
+        ...(order ? { orderSnapshot: order } : {})
       };
       writeJson(DASHBOARD_MESSAGES_FILE, dashboardMessages);
       return;
@@ -1342,20 +1354,8 @@ async function processEmails() {
           const key = String(mail.uid);
           if (seen[key]) continue;
 
-          const subjectLower = String(mail.subject || '').toLowerCase();
-
-          if (subjectLower.includes(CONFIG.formSubmitKeyword)) {
-            const order = parseFormSubmitMail(mail);
-
-            if (order?.code) {
-              if (!isSuppressed(order.code)) {
-                orders[order.code] = order;
-                codesToEvaluate.add(order.code);
-                console.log(`Commande site enregistrée : ${order.code} / ${money(order.amount)}`);
-              }
-            }
-          }
-
+          // Les commandes site ne sont plus lues via Gmail/FormSubmit.
+          // Elles arrivent directement par POST /order pour éviter les délais et les limites IMAP.
           const paypal = parsePaypalMail(mail);
           if (paypal?.code) {
             if (!isSuppressed(paypal.code)) {
@@ -1436,6 +1436,14 @@ async function processWebhookOrder(order) {
   orders[order.code] = order;
   writeJson(ORDERS_FILE, orders);
 
+  const dashboardMessages = readJson(DASHBOARD_MESSAGES_FILE);
+  dashboardMessages[order.code] = {
+    ...(dashboardMessages[order.code] || {}),
+    orderSnapshot: order,
+    webhookReceivedAt: new Date().toISOString()
+  };
+  writeJson(DASHBOARD_MESSAGES_FILE, dashboardMessages);
+
   const { channel: ticketChannel, ticket } = await getTicketOrder(order.code);
   const paypalTotal = getPaymentsTotal(order.code);
   const state = buildOrderState(order.code, order, ticket, paypalTotal);
@@ -1508,19 +1516,7 @@ async function start() {
   await discord.login(CONFIG.discordToken);
   startWebhookServer();
 
-  await processEmails().catch(error => {
-    console.error('Erreur première vérification mails :', error);
-  });
-
-  setInterval(() => {
-    processEmails().catch(error => {
-      console.error('Erreur vérification mails :', error);
-    });
-  }, CONFIG.checkIntervalSeconds * 1000);
-
-  console.log(`Vérification mail toutes les ${CONFIG.checkIntervalSeconds} secondes.`);
-  console.log(`Pause automatique Gmail si limite atteinte : ${CONFIG.imapLimitBackoffMinutes} minute(s).`);
-  console.log(`Mode test PayPal : ${CONFIG.allowTestPaypal ? 'ACTIF' : 'INACTIF'}`);
+  console.log('Mode Render webhook-only : commandes site uniquement. Gmail/PayPal désactivé ici.');
 }
 
 start().catch(error => {
