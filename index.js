@@ -57,7 +57,8 @@ const CONFIG = {
   mailMaxNewPerCycle: parseInt(process.env.MAIL_MAX_NEW_PER_CYCLE || '10', 10),
   imapLimitBackoffMinutes: parseInt(process.env.IMAP_LIMIT_BACKOFF_MINUTES || '10', 10),
   webhookPort: parseInt(process.env.PORT || process.env.WEBHOOK_PORT || '3000', 10),
-  webhookAllowedOrigin: process.env.WEBHOOK_ALLOWED_ORIGIN || ''
+  webhookAllowedOrigin: process.env.WEBHOOK_ALLOWED_ORIGIN || '',
+  paypalWebhookSecret: process.env.PAYPAL_WEBHOOK_SECRET || ''
 };
 
 const DATA_DIR = './data';
@@ -651,7 +652,8 @@ function buildOrderState(code, order, ticket, paypalTotal) {
 }
 
 
-function getPaymentEmoji(status) {
+function getPaymentEmoji(status, code = null) {
+  if (code && getDeliveryStatus(code)) return '✅';
   if (status === 'PAYE') return '✅';
   if (status === 'PARTIEL') return '🟠';
   if (status === 'PAYPAL_SANS_COMMANDE') return '💰';
@@ -722,7 +724,7 @@ function cleanChannelNameForStatus(name) {
 async function updateTicketChannelName(ticketChannel, state) {
   if (!ticketChannel || typeof ticketChannel.setName !== 'function') return;
 
-  const paymentEmoji = getPaymentEmoji(state.status);
+  const paymentEmoji = getPaymentEmoji(state.status, state.code);
   const deliveryEmoji = getDeliveryEmoji(state.code);
   const base = cleanChannelNameForStatus(ticketChannel.name || `cm-${state.code.toLowerCase()}`);
   const nextName = `${base}-${paymentEmoji}-${deliveryEmoji}`
@@ -929,7 +931,7 @@ Salon : <#${ticketChannel.id}>` : ''}`
       : 'Non lié';
     const delivered = getDeliveryStatus(code);
     const deliveryLine = delivered ? '📦 LIVRÉ' : '⏳ NON LIVRÉ';
-    const paymentEmoji = getPaymentEmoji(state.status);
+    const paymentEmoji = getPaymentEmoji(state.status, code);
     const deliveryEmoji = getDeliveryEmoji(code);
     const dashboardMessages = readJson(DASHBOARD_MESSAGES_FILE);
     const timerLine = getInitialExpiryText(code, state, dashboardMessages);
@@ -950,6 +952,13 @@ ${timerLine}` : '')
           name: '📦 Commande',
           value: `Produit : **${mainProduct}**
 Quantité : **x${mainQuantity}**`,
+          inline: false
+        },
+        {
+          name: '👤 Client',
+          value: order?.identification
+            ? `${order.network ? `Réseau : **${order.network}**\n` : ''}Identification : **${order.identification}**`
+            : (order?.discord ? `Réseau : **Discord**\nIdentification : **${order.discord}**` : 'Non précisé'),
           inline: false
         },
         {
@@ -1415,6 +1424,8 @@ function sanitizeWebhookOrder(body) {
     code,
     amount,
     discord: body?.discord || body?.Discord || null,
+    identification: normalizeText(body?.identification || body?.Identification || body?.client || body?.Client || '').trim() || null,
+    network: normalizeText(body?.network || body?.Network || body?.reseau || body?.Réseau || '').trim() || null,
     product,
     quantity,
     name: body?.name || body?.Nom || null,
@@ -1459,6 +1470,29 @@ async function processWebhookOrder(order) {
   return { ok: true, code: order.code, status: state.status };
 }
 
+
+async function processPaypalWebhookPayment(payload) {
+  const code = extractCode(payload?.code || payload?.orderCode || payload?.Code_Commande || '');
+  if (!code) throw new Error('Code commande PayPal manquant ou invalide');
+  if (isSuppressed(code)) return { ignored: true, reason: 'Commande supprimée' };
+
+  const rawAmounts = Array.isArray(payload?.amounts) ? payload.amounts : [payload?.amount ?? payload?.Montant ?? payload?.total];
+  const amounts = rawAmounts.map(parseAmount).filter(v => v !== null);
+  if (amounts.length === 0) throw new Error('Montant PayPal manquant ou invalide');
+
+  const paypal = {
+    code,
+    amounts,
+    subject: payload?.subject || `[PAYPAL WEBHOOK] ${code}`,
+    from: payload?.from || 'paypal-forwarder',
+    receivedAt: payload?.receivedAt || new Date().toISOString()
+  };
+
+  addPaypalPayment(paypal);
+  await evaluateOrder(code);
+  return { ok: true, code, amounts };
+}
+
 function startWebhookServer() {
   const app = express();
 
@@ -1487,6 +1521,19 @@ function startWebhookServer() {
     } catch (error) {
       console.error('Webhook commande refusé :', error?.stack || error?.message || error);
       res.status(400).json({ ok: false, error: error?.message || 'Commande invalide' });
+    }
+  });
+
+  app.post('/paypal', async (req, res) => {
+    try {
+      if (CONFIG.paypalWebhookSecret && req.headers['x-cheapmeal-secret'] !== CONFIG.paypalWebhookSecret) {
+        return res.status(401).json({ ok: false, error: 'Secret invalide' });
+      }
+      const result = await processPaypalWebhookPayment(req.body || {});
+      res.json(result);
+    } catch (error) {
+      console.error('Webhook PayPal refusé :', error?.stack || error?.message || error);
+      res.status(400).json({ ok: false, error: error?.message || 'Paiement invalide' });
     }
   });
 
