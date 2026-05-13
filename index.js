@@ -587,10 +587,15 @@ async function notifyTicketValidated(order, ticket, paypalTotal) {
       `Montant reçu : **${money(paypalTotal)}**
 
 ` +
-      `Le staff peut maintenant livrer la commande.
+      `Votre paiement est bien validé ✅
 
 ` +
-      `🙏 Après réception, n'hésitez pas à laisser un avis sur le serveur, ça nous aide énormément.`
+      `Votre commande sera livrée d’ici quelques instants dans ce ticket.
+` +
+      `Merci de patienter pendant que le staff prépare la livraison.
+
+` +
+      `🙏 Après réception, n’hésitez pas à laisser un avis sur le serveur, ça nous aide énormément.`
     );
 
   // Si un ticket Discord existe, on le prévient. Sinon la commande reste validée dans le dashboard.
@@ -690,6 +695,9 @@ function setDeliveryStatus(code, delivered, userId = null) {
 
   if (!delivered) {
     deliveries[code].archived = false;
+    deliveries[code].archivedAt = null;
+    deliveries[code].archivedBy = null;
+    deliveries[code].archiveMessageId = null;
     deliveries[code].deliveredAt = null;
   }
 
@@ -759,15 +767,13 @@ function buildDeliveryButtons(code) {
         .setEmoji('⏳')
     );
 
-    if (CONFIG.archiveChannelId) {
-      buttons.push(
-        new ButtonBuilder()
-          .setCustomId(`delivery:archive:${code}`)
-          .setLabel('Archiver')
-          .setStyle(ButtonStyle.Primary)
-          .setEmoji('🗄️')
-      );
-    }
+    buttons.push(
+      new ButtonBuilder()
+        .setCustomId(`delivery:archive:${code}`)
+        .setLabel('Archiver')
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji('🗄️')
+    );
   }
 
   buttons.push(
@@ -936,13 +942,23 @@ Salon : <#${ticketChannel.id}>` : ''}`
     const dashboardMessages = readJson(DASHBOARD_MESSAGES_FILE);
     const timerLine = getInitialExpiryText(code, state, dashboardMessages);
 
+    const needsDelivery = state.status === 'PAYE' && !delivered;
+    const embedColor = needsDelivery ? 0xff0000 : (delivered && state.status === 'PAYE' ? 0x3498db : state.color);
+    const urgentLine = needsDelivery
+      ? `
+
+🚨 **À LIVRER MAINTENANT**
+Paiement validé, commande en attente de livraison.`
+      : '';
+
     const embed = new EmbedBuilder()
-      .setTitle(`Suivi commande — ${code}`)
-      .setColor(delivered && state.status === 'PAYE' ? 0x3498db : state.color)
+      .setTitle(needsDelivery ? `🚨 À LIVRER — ${code}` : `Suivi commande — ${code}`)
+      .setColor(embedColor)
       .setDescription(
         `**Paiement : ${paymentEmoji} ${state.label.replace(/^[^ ]+\s*/, '')}**
 ` +
         `**Livraison : ${deliveryEmoji} ${deliveryLine.replace(/^[^ ]+\s*/, '')}**` +
+        urgentLine +
         (timerLine ? `
 
 ${timerLine}` : '')
@@ -1209,16 +1225,21 @@ async function handleDeliveryInteraction(interaction) {
     return;
   }
 
+  if (action !== 'done' && action !== 'undone') return;
+
+  // Discord demande une réponse rapide aux boutons. On accuse réception AVANT
+  // de modifier les fichiers, renommer le ticket ou rééditer le suivi.
+  await interaction.deferUpdate().catch(() => {});
+
   if (action === 'done') {
     setDeliveryStatus(code, true, interaction.user?.id || null);
   } else if (action === 'undone') {
     setDeliveryStatus(code, false, interaction.user?.id || null);
-  } else {
-    return;
   }
 
-  await interaction.deferUpdate();
-  await refreshOrderDisplay(code);
+  await refreshOrderDisplay(code).catch(error => {
+    console.error(`Rafraîchissement livraison impossible pour ${code} :`, error?.stack || error?.message || error);
+  });
 }
 
 
