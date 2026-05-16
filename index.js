@@ -928,9 +928,18 @@ async function notifyDashboardChannel(code, order, ticket, paypalTotal, stateOrS
     const siteLine = order
       ? formatOrderLine(order, ticket)
       : '❌ introuvable';
-    const paypalLine = paypalTotal > 0
-      ? `✅ ${money(paypalTotal)}`
-      : '❌ non reçu';
+    let paypalLine = '❌ non reçu';
+    if (paypalTotal > 0) {
+      if (state.status === 'PARTIEL' && state.expected !== null && state.expected !== undefined) {
+        const missing = Math.max(0, Math.round((state.expected - paypalTotal) * 100) / 100);
+        paypalLine = `🟠 ${money(paypalTotal)} / ${money(state.expected)}
+Reste à payer : **${money(missing)}**`;
+      } else if (state.expected !== null && state.expected !== undefined) {
+        paypalLine = `✅ ${money(paypalTotal)} / ${money(state.expected)}`;
+      } else {
+        paypalLine = `✅ ${money(paypalTotal)}`;
+      }
+    }
     const discordLine = ticket
       ? `✅ ${formatOrderLine(ticket, order).replace(/^✅ /, '')}${ticketChannel ? `
 Salon : <#${ticketChannel.id}>` : ''}`
